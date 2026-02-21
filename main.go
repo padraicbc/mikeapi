@@ -4,18 +4,20 @@ import (
 	"context"
 	"embed"
 	"io/fs"
-	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/padraicbc/mikeapi/config"
 	"github.com/padraicbc/mikeapi/db"
 	"github.com/padraicbc/mikeapi/handlers"
+	applog "github.com/padraicbc/mikeapi/logger"
 	mw "github.com/padraicbc/mikeapi/middleware"
 )
 
@@ -25,15 +27,19 @@ import (
 var embeddedFiles embed.FS
 
 func main() {
-	log.SetFlags(log.Llongfile)
-
 	cfg := config.Load()
+	logger, err := applog.New(cfg.Debug)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = logger.Sync() }()
+	zap.ReplaceGlobals(logger)
 
 	bdb := db.Setup(cfg)
 	defer bdb.Close()
 
 	if err := db.CreateTables(context.Background(), bdb); err != nil {
-		log.Fatal("create tables:", err)
+		logger.Fatal("create tables failed", zap.Error(err))
 	}
 
 	h := handlers.New(bdb, cfg.JWTKey())
@@ -45,7 +51,22 @@ func main() {
 		LogStatus: true,
 		LogError:  true,
 		LogValuesFunc: func(c echo.Context, v echomw.RequestLoggerValues) error {
-			log.Printf("[%d] %s %s err=%v", v.Status, v.Method, v.URI, v.Error)
+			fields := []zap.Field{
+				zap.Int("status", v.Status),
+				zap.String("method", v.Method),
+				zap.String("uri", v.URI),
+			}
+			if v.Error != nil {
+				fields = append(fields, zap.Error(v.Error))
+			}
+			switch {
+			case v.Status >= 500:
+				logger.Error("http request", fields...)
+			case v.Status >= 400:
+				logger.Warn("http request", fields...)
+			default:
+				logger.Info("http request", fields...)
+			}
 			return nil
 		},
 	}))
@@ -81,7 +102,7 @@ func main() {
 	// Strip the "build/" prefix so URLs work correctly
 	subFS, err := fs.Sub(embeddedFiles, "build")
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("open embedded build fs failed", zap.Error(err))
 	}
 	// Serve static files correctly using Echo's WrapHandler
 	fileServer := http.FileServer(http.FS(subFS))
@@ -105,8 +126,10 @@ func main() {
 	})
 
 	if cfg.Debug {
-		log.Println("debug mode – listening on", cfg.Port)
-		log.Fatal(e.Start(cfg.Port))
+		logger.Info("starting server", zap.String("mode", "debug"), zap.String("addr", cfg.Port))
+		if err := e.Start(cfg.Port); err != nil {
+			logger.Fatal("server exited", zap.Error(err))
+		}
 		return
 	}
 
@@ -126,6 +149,7 @@ func main() {
 	}
 
 	if err := s.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
-		log.Fatal(err)
+		logger.Error("tls server exited", zap.Error(err))
+		os.Exit(1)
 	}
 }

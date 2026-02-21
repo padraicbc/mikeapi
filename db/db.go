@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 
+	"go.uber.org/zap"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -25,7 +25,7 @@ func Setup(cfg *config.Config) *bun.DB {
 	}
 
 	if err := db.PingContext(context.Background()); err != nil {
-		log.Fatal("failed to connect to database:", err)
+		zap.L().Fatal("failed to connect to database", zap.Error(err))
 	}
 
 	return db
@@ -57,7 +57,7 @@ func CreateTables(ctx context.Context, db *bun.DB) error {
 	}
 	for _, stmt := range constraints {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			log.Printf("constraint: %v", err)
+			zap.L().Warn("constraint setup failed", zap.Error(err))
 		}
 	}
 
