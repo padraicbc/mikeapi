@@ -83,6 +83,7 @@ func main() {
 	rp := e.Group("/rp", mw.JWT(cfg.JWTKey()))
 	rp.GET("/dates", h.Dates)
 	rp.GET("/courses", h.Courses)
+	rp.POST("/courses", h.CreateCourse)
 	rp.GET("/results", h.Results)
 	rp.POST("/analysis-results-update", h.ResultsAnalysis)
 	rp.GET("/amended", h.ResultsAmended)
