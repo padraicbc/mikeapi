@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -124,7 +125,12 @@ func doInterInsert(ctx context.Context, db *bun.DB, pre []interMed, mr, raceID s
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for _, im := range pre {
 		tfr := nullableString(im.Tfr)
@@ -149,17 +155,32 @@ func doInterInsert(ctx context.Context, db *bun.DB, pre []interMed, mr, raceID s
 		return err
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+
+	return nil
 }
 
 // UpdatePreRace updates runners JSON in pre_race and mr in races.
 func (h *Handler) UpdatePreRace(c echo.Context) error {
 	mr := c.QueryParam("mr")
 	raceID := c.QueryParam("raceID")
+	if raceID == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "missing raceID param")
+	}
 
 	body, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	payload := strings.TrimSpace(string(body))
+	if payload == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "empty runners payload")
+	}
+	if !json.Valid([]byte(payload)) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid runners JSON payload")
 	}
 
 	ctx := c.Request().Context()
@@ -170,10 +191,15 @@ func (h *Handler) UpdatePreRace(c echo.Context) error {
 			if err != nil {
 				return err
 			}
-			defer tx.Rollback()
+			committed := false
+			defer func() {
+				if !committed {
+					_ = tx.Rollback()
+				}
+			}()
 
 			if _, err = tx.ExecContext(ctx,
-				`UPDATE pre_race SET runners = ? WHERE race_id = ?`, body, raceID,
+				`UPDATE pre_race SET runners = ?::jsonb WHERE race_id = ?`, payload, raceID,
 			); err != nil {
 				return err
 			}
@@ -182,7 +208,12 @@ func (h *Handler) UpdatePreRace(c echo.Context) error {
 			); err != nil {
 				return err
 			}
-			return tx.Commit()
+			if err = tx.Commit(); err != nil {
+				return err
+			}
+			committed = true
+
+			return nil
 		}()
 		if lastErr == nil {
 			break

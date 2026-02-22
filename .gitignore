@@ -4,3 +4,8 @@
 !.env.example
 .envrc
 build/*
+docker/traefik/cloudflare.env
+docker/traefik/certs/*.pem
+docker/traefik/certs/*.crt
+docker/traefik/certs/*.key
+docker/traefik/certs/*.p12

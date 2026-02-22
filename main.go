@@ -21,8 +21,6 @@ import (
 	mw "github.com/padraicbc/mikeapi/middleware"
 )
 
-//go:generate  pnpm run --prefix ../../ui build
-//go:generate  cp -r ../../ui/build .
 //go:embed all:build/*
 var embeddedFiles embed.FS
 

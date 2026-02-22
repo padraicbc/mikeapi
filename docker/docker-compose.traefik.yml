@@ -1,0 +1,74 @@
+name: mikeapi
+
+services:
+  traefik:
+    image: traefik:v3.6.8
+    restart: unless-stopped
+    environment:
+      # Docker v28+ can reject very old API defaults (e.g. 1.24).
+      DOCKER_API_VERSION: "${DOCKER_API_VERSION:-1.44}"
+    command:
+      - --entryPoints.web.address=:80
+      - --entryPoints.websecure.address=:443
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --api.dashboard=true
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
+      - traefik_data:/traefik
+    networks:
+      - gateway
+
+  mikeapi:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mikeapi:local
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # Run internal HTTP only behind Traefik.
+      DEBUG: "true"
+      PORT: ":9000"
+      # Default to host database when DB is not containerized yet.
+      DB_HOST: "${DB_HOST_DOCKER:-host.docker.internal}"
+      # Useful when PostgreSQL only has hostssl rules for remote clients.
+      DB_SSLMODE: "${DB_SSLMODE_DOCKER:-disable}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "9000"
+    labels:
+      traefik.enable: "true"
+      traefik.http.services.mikeapi.loadbalancer.server.port: "9000"
+      traefik.http.routers.mikeapi-http.rule: "Host(`${APP_HOST:-localhost}`)"
+      traefik.http.routers.mikeapi-http.entrypoints: "web"
+      traefik.http.routers.mikeapi-http.middlewares: "redirect-to-https@file"
+      traefik.http.routers.mikeapi-http.service: "noop@internal"
+      traefik.http.routers.mikeapi-https.rule: "Host(`${APP_HOST:-localhost}`)"
+      traefik.http.routers.mikeapi-https.entrypoints: "websecure"
+      traefik.http.routers.mikeapi-https.tls: "true"
+      traefik.http.routers.mikeapi-https.service: "mikeapi"
+    networks:
+      - gateway
+
+networks:
+  gateway:
+    name: mikeapi_gateway
+    ipam:
+      config:
+        - subnet: "${MIKEAPI_DOCKER_SUBNET:-172.29.0.0/24}"
+
+volumes:
+  traefik_data:

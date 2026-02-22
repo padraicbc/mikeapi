@@ -1,0 +1,8 @@
+.git
+.gitignore
+api
+migrate
+node_modules
+.svelte-kit
+tmp
+*.log

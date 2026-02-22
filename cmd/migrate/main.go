@@ -12,12 +12,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/padraicbc/mikeapi/config"
 	bundb "github.com/padraicbc/mikeapi/db"
@@ -53,18 +56,35 @@ func main() {
 
 	// Create tables (idempotent)
 	if err := bundb.CreateTables(ctx, pgDB); err != nil {
-		log.Fatalf("create tables: %v", err)
+		if !isInsufficientPrivilege(err) {
+			log.Fatalf("create tables: %v", err)
+		}
+		log.Printf("create tables skipped (insufficient privilege): %v", err)
+
+		missing, checkErr := missingTables(ctx, pgDB)
+		if checkErr != nil {
+			log.Fatalf("verify tables after create skip: %v", checkErr)
+		}
+		if len(missing) > 0 {
+			log.Fatalf("cannot continue: missing tables and no create privilege: %s", strings.Join(missing, ", "))
+		}
+		log.Println("all required tables already exist; continuing without create privilege")
 	}
 
 	// Disable FK enforcement so we can load in bulk without strict ordering
 	if _, err := pgDB.ExecContext(ctx, "SET session_replication_role = 'replica'"); err != nil {
-		log.Fatalf("disable FK: %v", err)
-	}
-	defer func() {
-		if _, err := pgDB.ExecContext(ctx, "SET session_replication_role = 'origin'"); err != nil {
-			log.Printf("re-enable FK: %v", err)
+		if isInsufficientPrivilege(err) {
+			log.Printf("disable FK skipped (insufficient privilege): %v", err)
+		} else {
+			log.Fatalf("disable FK: %v", err)
 		}
-	}()
+	} else {
+		defer func() {
+			if _, err := pgDB.ExecContext(ctx, "SET session_replication_role = 'origin'"); err != nil {
+				log.Printf("re-enable FK: %v", err)
+			}
+		}()
+	}
 
 	steps := []struct {
 		name string
@@ -572,4 +592,38 @@ func resetSequences(ctx context.Context, pgDB *bun.DB) {
 		}
 	}
 	log.Println("sequences reset")
+}
+
+func isInsufficientPrivilege(err error) bool {
+	var pgErr pgdriver.Error
+	if errors.As(err, &pgErr) {
+		// SQLSTATE 42501: insufficient_privilege
+		return pgErr.Field('C') == "42501"
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "permission denied")
+}
+
+func missingTables(ctx context.Context, pgDB *bun.DB) ([]string, error) {
+	required := []string{
+		"users",
+		"courses",
+		"horses",
+		"trainers",
+		"races",
+		"pre_race",
+		"results",
+		"intermediary",
+	}
+
+	missing := make([]string, 0, len(required))
+	for _, table := range required {
+		var reg sql.NullString
+		if err := pgDB.NewRaw(`SELECT to_regclass(?)`, "public."+table).Scan(ctx, &reg); err != nil {
+			return nil, err
+		}
+		if !reg.Valid || reg.String == "" {
+			missing = append(missing, table)
+		}
+	}
+	return missing, nil
 }

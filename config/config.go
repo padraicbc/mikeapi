@@ -20,6 +20,7 @@ type Config struct {
 	DBHost      string
 	DBPort      string
 	DBName      string
+	DBSSLMode   string
 
 	// JWT signing secret (required in production).
 	JWTSecret string
@@ -59,6 +60,7 @@ func Load() *Config {
 	v.SetDefault("DB_HOST", "localhost")
 	v.SetDefault("DB_PORT", "5432")
 	v.SetDefault("DB_NAME", "rpdata")
+	v.SetDefault("DB_SSLMODE", "disable")
 	v.SetDefault("PORT", ":9000")
 	v.SetDefault("TLS_DOMAINS", "mmrace.app,www.mmrace.app")
 	v.SetDefault("DEBUG", false)
@@ -70,6 +72,7 @@ func Load() *Config {
 		DBHost:      v.GetString("DB_HOST"),
 		DBPort:      v.GetString("DB_PORT"),
 		DBName:      v.GetString("DB_NAME"),
+		DBSSLMode:   v.GetString("DB_SSLMODE"),
 		JWTSecret:   v.GetString("JWT_SECRET"),
 		Debug:       v.GetBool("DEBUG"),
 		Port:        v.GetString("PORT"),
@@ -118,8 +121,13 @@ func (c *Config) PostgresDSN() string {
 		return c.DatabaseURL
 	}
 	return fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		c.DBUser, c.DBPass, c.DBHost, c.DBPort, c.DBName,
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		c.DBUser,
+		c.DBPass,
+		c.DBHost,
+		c.DBPort,
+		c.DBName,
+		c.DBSSLMode,
 	)
 }
 

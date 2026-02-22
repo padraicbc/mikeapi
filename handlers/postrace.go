@@ -136,7 +136,12 @@ func (h *Handler) SaveToResPostRace(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for _, ru := range fields {
 		_, err = tx.ExecContext(ctx,
@@ -173,6 +178,7 @@ func (h *Handler) SaveToResPostRace(c echo.Context) error {
 	if err = tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	committed = true
 
 	return c.NoContent(http.StatusAccepted)
 }
