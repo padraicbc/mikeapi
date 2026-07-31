@@ -11,6 +11,7 @@ import (
 type resultsAnalysisRow struct {
 	// results table (alias r)
 	ID               int      `bun:"id"`
+	HorseID          int      `bun:"horse_id"`
 	Placed           string   `bun:"placed"`
 	OfficialRat      *int     `bun:"official_rat"`
 	WeightCarried    int      `bun:"weight_carried"`
@@ -42,6 +43,7 @@ type resultsAnalysisRow struct {
 
 type resultsAnalysisRunner struct {
 	ID               int      `json:"id"`
+	HorseID          int      `json:"horseID"`
 	Placed           string   `json:"placed"`
 	OfficialRat      *int     `json:"officialRat"`
 	WeightCarried    int      `json:"weightCarried"`
@@ -75,7 +77,7 @@ type resultsAnalysisRace struct {
 
 const resultsJoinSQL = `
 SELECT
-	r.id, r.placed, r.official_rat, r.weight_carried, h.horse,
+	r.id, r.horse_id, r.placed, r.official_rat, r.weight_carried, h.horse,
 	r.mr_plus_or, r.mr2_plus_or, r.tfsf, r.sec_t, r.speed_per, r.comment, r.dist_behind_winner,
 	rc.date::text AS date, rc.time, rc.class, rc.distance, rc.going, rc.url,
 	rc.race_id, rc.mr, rc.mr2, rc.main_comment,
@@ -185,6 +187,7 @@ func groupResultsByRace(rows []resultsAnalysisRow) []resultsAnalysisRace {
 		key := fmt.Sprintf("%d", row.RaceID)
 		runner := resultsAnalysisRunner{
 			ID:               row.ID,
+			HorseID:          row.HorseID,
 			Placed:           row.Placed,
 			OfficialRat:      row.OfficialRat,
 			WeightCarried:    row.WeightCarried,

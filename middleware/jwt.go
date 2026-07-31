@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -41,10 +42,18 @@ func JWT(key []byte) echo.MiddlewareFunc {
 				return key, nil
 			})
 			if err != nil {
-				if err == jwt.ErrSignatureInvalid {
+				switch {
+				case errors.Is(err, jwt.ErrTokenExpired):
+					return echo.NewHTTPError(http.StatusUnauthorized, "token expired")
+				case errors.Is(err, jwt.ErrTokenSignatureInvalid), errors.Is(err, jwt.ErrSignatureInvalid):
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid token signature")
+				case errors.Is(err, jwt.ErrTokenMalformed),
+					errors.Is(err, jwt.ErrTokenUnverifiable),
+					errors.Is(err, jwt.ErrTokenNotValidYet),
+					errors.Is(err, jwt.ErrTokenInvalidClaims):
+					return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
 				}
-				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
 			}
 			if !tkn.Valid {
 				return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")

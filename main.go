@@ -97,6 +97,7 @@ func main() {
 	rp.GET("/trainers", h.GetAllTrainers)
 	rp.GET("/trainer-notes", h.GetTrainerText)
 	rp.POST("/trainer-save", h.SaveTrainerText)
+	rp.GET("/horses/:horseID", h.HorseProfile)
 
 	// Strip the "build/" prefix so URLs work correctly
 	subFS, err := fs.Sub(embeddedFiles, "build")

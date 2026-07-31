@@ -14,6 +14,7 @@ type formRow struct {
 	MrPlusOr         *int     `bun:"mr_plus_or"`
 	Tfsf             *int     `bun:"tfsf"`
 	TfsfMinusOr      *int     `bun:"tfsf_minus_or"`
+	Tfr              *string  `bun:"tfr"`
 	DistBehindWinner *float64 `bun:"dist_behind_winner"`
 	SecT             *float64 `bun:"sec_t"`
 	SpeedPer         *float64 `bun:"speed_per"`
@@ -45,6 +46,7 @@ type formJSON struct {
 	MrPlusOr         *int     `json:"mrPlusOr,omitempty"`
 	Tfsf             *int     `json:"tfsf,omitempty"`
 	TfsfMinusOr      *int     `json:"tfsfMinusOr,omitempty"`
+	Tfr              *string  `json:"tfr,omitempty"`
 	DistBehindWinner *float64 `json:"distBehindWinner,omitempty"`
 	SecT             *float64 `json:"secT,omitempty"`
 	SpeedPer         *float64 `json:"speedPer,omitempty"`
@@ -77,7 +79,7 @@ func (h *Handler) GetForm(c echo.Context) error {
 		TableExpr("results r").
 		ColumnExpr(`
 			r.pace, r.official_rat, r.mr2_plus_or, r.mr_plus_or,
-			r.tfsf, r.tfsf_minus_or, r.dist_behind_winner, r.sec_t, r.speed_per,
+			r.tfsf, r.tfsf_minus_or, r.tfr, r.dist_behind_winner, r.sec_t, r.speed_per,
 			r.weight_carried, r.wc_mr2_plus_or,
 			c.course,
 			rc.date::text AS date, rc.time, rc.url, r.placed, rc.class, rc.going,
@@ -107,6 +109,7 @@ func (h *Handler) GetForm(c echo.Context) error {
 			MrPlusOr:         row.MrPlusOr,
 			Tfsf:             row.Tfsf,
 			TfsfMinusOr:      row.TfsfMinusOr,
+			Tfr:              row.Tfr,
 			DistBehindWinner: row.DistBehindWinner,
 			SecT:             row.SecT,
 			SpeedPer:         row.SpeedPer,
@@ -156,6 +159,9 @@ func applyFormFilters(sb *bun.SelectQuery, q map[string][]string) {
 	}
 	if v := get("minTFSF"); v != "" {
 		sb.Where("r.tfsf >= ?", v)
+	}
+	if v := get("minTFR"); v != "" {
+		sb.Where("r.tfr IS NOT NULL AND r.tfr ~ '^[0-9]+' AND substring(r.tfr FROM '^[0-9]+')::integer >= ?", v)
 	}
 	if v := get("maxClass"); v != "" && v != "4" {
 		sb.Where("rc.class <= ?", v)
