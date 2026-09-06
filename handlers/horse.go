@@ -83,5 +83,25 @@ func (h *Handler) HorseProfile(c echo.Context) error {
 		profile.WinRate = float64(profile.Wins) * 100 / float64(profile.Runs)
 	}
 
+	// A forthcoming card is more current than the horse's latest completed
+	// result. Its runner row is refreshed whenever the daily card is scraped.
+	var currentCard struct {
+		Age     *int   `bun:"age"`
+		Trainer string `bun:"trainer"`
+	}
+	if err := h.db.NewRaw(`
+		SELECT NULLIF(prr.runner->>'age', '')::integer AS age,
+		       COALESCE(prr.runner->>'trainer', '') AS trainer
+		FROM pre_race_runners prr
+		INNER JOIN races rc ON rc.race_id = prr.race_id
+		WHERE prr.horse_id = ?
+		ORDER BY rc.date DESC, rc.time DESC
+		LIMIT 1`, horseID).Scan(c.Request().Context(), &currentCard); err == nil && currentCard.Age != nil {
+		profile.Age = currentCard.Age
+		if currentCard.Trainer != "" {
+			profile.Trainer = currentCard.Trainer
+		}
+	}
+
 	return c.JSON(http.StatusOK, profile)
 }

@@ -186,6 +186,9 @@ func applyFormFilters(sb *bun.SelectQuery, q map[string][]string) {
 	if v := get("going"); v != "" && v != "All" {
 		sb.Where("rc.going = ?", v)
 	}
+	if v := get("ageRestriction"); v != "" {
+		sb.Where("rc.age_restriction = ?", v)
+	}
 
 	mr, or_ := get("mr"), get("or")
 	if v := get("minDiff"); v != "" && mr != "" && or_ != "" {

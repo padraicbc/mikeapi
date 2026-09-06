@@ -7,9 +7,9 @@ type Result struct {
 	bun.BaseModel `bun:"table:results,alias:r"`
 
 	ID               int      `bun:"id,pk,autoincrement" json:"id"`
-	HorseID          int      `bun:"horse_id,notnull" json:"horseID"`
+	HorseID          int      `bun:"horse_id,notnull,unique:results_no_dupes" json:"horseID"`
 	CourseID         int      `bun:"course_id,notnull" json:"courseID"`
-	RaceID           int      `bun:"race_id,notnull" json:"raceID"`
+	RaceID           int      `bun:"race_id,notnull,unique:results_no_dupes" json:"raceID"`
 	Age              int      `bun:"age,notnull" json:"age"`
 	Price            string   `bun:"price,notnull" json:"price"`
 	Trainer          string   `bun:"trainer,notnull" json:"trainer"`

@@ -6,7 +6,8 @@ import (
 	"github.com/uptrace/bun"
 )
 
-// PreRace stores pre-race card data with runner JSON.
+// PreRace describes the archived legacy table for migration reference only.
+// Active cards use PreRaceRunner with Race and Course metadata.
 type PreRace struct {
 	bun.BaseModel `bun:"table:pre_race,alias:pr"`
 

@@ -30,8 +30,14 @@ type Config struct {
 	Port       string
 	TLSDomains []string
 
-	// MySQL – used only by cmd/migrate.
-	MySQLDSN string
+	// Source PostgreSQL – used only by cmd/migrate.
+	SourceDatabaseURL string
+	SourceDBUser      string
+	SourceDBPass      string
+	SourceDBHost      string
+	SourceDBPort      string
+	SourceDBName      string
+	SourceDBSSLMode   string
 }
 
 // RPConfig holds configuration used by the mikerp scraper app.
@@ -66,18 +72,24 @@ func Load() *Config {
 	v.SetDefault("DEBUG", false)
 
 	cfg := &Config{
-		DatabaseURL: v.GetString("DATABASE_URL"),
-		DBUser:      v.GetString("DB_USER"),
-		DBPass:      v.GetString("DB_PASS"),
-		DBHost:      v.GetString("DB_HOST"),
-		DBPort:      v.GetString("DB_PORT"),
-		DBName:      v.GetString("DB_NAME"),
-		DBSSLMode:   v.GetString("DB_SSLMODE"),
-		JWTSecret:   v.GetString("JWT_SECRET"),
-		Debug:       v.GetBool("DEBUG"),
-		Port:        v.GetString("PORT"),
-		TLSDomains:  splitTrimmed(v.GetString("TLS_DOMAINS")),
-		MySQLDSN:    v.GetString("MYSQL_DSN"),
+		DatabaseURL:       v.GetString("DATABASE_URL"),
+		DBUser:            v.GetString("DB_USER"),
+		DBPass:            v.GetString("DB_PASS"),
+		DBHost:            v.GetString("DB_HOST"),
+		DBPort:            v.GetString("DB_PORT"),
+		DBName:            v.GetString("DB_NAME"),
+		DBSSLMode:         v.GetString("DB_SSLMODE"),
+		JWTSecret:         v.GetString("JWT_SECRET"),
+		Debug:             v.GetBool("DEBUG"),
+		Port:              v.GetString("PORT"),
+		TLSDomains:        splitTrimmed(v.GetString("TLS_DOMAINS")),
+		SourceDatabaseURL: v.GetString("SOURCE_DATABASE_URL"),
+		SourceDBUser:      firstNonBlank(v.GetString("SOURCE_DB_USER"), v.GetString("DB_USER")),
+		SourceDBPass:      firstNonBlank(v.GetString("SOURCE_DB_PASS"), v.GetString("DB_PASS")),
+		SourceDBHost:      firstNonBlank(v.GetString("SOURCE_DB_HOST"), v.GetString("MIKEDO")),
+		SourceDBPort:      firstNonBlank(v.GetString("SOURCE_DB_PORT"), "5432"),
+		SourceDBName:      firstNonBlank(v.GetString("SOURCE_DB_NAME"), v.GetString("DB_NAME")),
+		SourceDBSSLMode:   firstNonBlank(v.GetString("SOURCE_DB_SSLMODE"), v.GetString("DB_SSLMODE")),
 	}
 
 	cfg.validate()
@@ -129,6 +141,28 @@ func (c *Config) PostgresDSN() string {
 		c.DBName,
 		c.DBSSLMode,
 	)
+}
+
+// SourcePostgresDSN returns the PostgreSQL source used by cmd/migrate.
+func (c *Config) SourcePostgresDSN() string {
+	if c.SourceDatabaseURL != "" {
+		return c.SourceDatabaseURL
+	}
+	return fmt.Sprintf(
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		c.SourceDBUser,
+		c.SourceDBPass,
+		c.SourceDBHost,
+		c.SourceDBPort,
+		c.SourceDBName,
+		c.SourceDBSSLMode,
+	)
+}
+
+// HasPostgresSource requires an explicit source host or URL so migration can
+// never accidentally read from and write to the target database.
+func (c *Config) HasPostgresSource() bool {
+	return strings.TrimSpace(c.SourceDatabaseURL) != "" || strings.TrimSpace(c.SourceDBHost) != ""
 }
 
 // JWTKey returns the JWT signing key as a byte slice.
@@ -194,4 +228,13 @@ func splitTrimmed(s string) []string {
 		}
 	}
 	return out
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }

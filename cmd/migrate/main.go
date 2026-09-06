@@ -1,24 +1,22 @@
 // cmd/migrate/main.go
-// Migrates data from a remote MySQL rpData database into the local PostgreSQL database.
+// Migrates data between PostgreSQL rpdata databases.
 //
 // Usage:
 //
-//	MYSQL_DSN="user:pass@tcp(host:3306)/rpData?parseTime=true" \
-//	RPPASS="pgpass" \
+//	SOURCE_DATABASE_URL="postgres://user:pass@source:5432/rpdata?sslmode=disable" \
+//	DATABASE_URL="postgres://user:pass@target:5432/rpdata?sslmode=disable" \
 //	go run ./cmd/migrate
 package main
 
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/driver/pgdriver"
 
@@ -34,20 +32,17 @@ func main() {
 
 	cfg := config.Load()
 
-	// --- MySQL ---
-	if cfg.MySQLDSN == "" {
-		log.Fatal("MYSQL_DSN required, e.g.: user:pass@tcp(host:3306)/rpData?parseTime=true")
+	// --- source PostgreSQL ---
+	if !cfg.HasPostgresSource() {
+		log.Fatal("SOURCE_DATABASE_URL or SOURCE_DB_HOST is required")
 	}
-	myDB, err := sql.Open("mysql", cfg.MySQLDSN)
-	if err != nil {
-		log.Fatalf("open mysql: %v", err)
+	sourceDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(cfg.SourcePostgresDSN())))
+	defer sourceDB.Close()
+	sourceDB.SetMaxOpenConns(4)
+	if err := sourceDB.PingContext(ctx); err != nil {
+		log.Fatalf("ping source PostgreSQL: %v", err)
 	}
-	defer myDB.Close()
-	myDB.SetMaxOpenConns(4)
-	if err := myDB.PingContext(ctx); err != nil {
-		log.Fatalf("ping mysql: %v", err)
-	}
-	log.Println("connected to MySQL")
+	log.Println("connected to source PostgreSQL")
 
 	// --- PostgreSQL ---
 	pgDB := bundb.Setup(cfg)
@@ -86,18 +81,32 @@ func main() {
 		}()
 	}
 
+	if n, err := migrateUsers(ctx, sourceDB, pgDB); err != nil {
+		log.Fatalf("migrate users: %v", err)
+	} else {
+		log.Printf("%-20s %d rows migrated", "users", n)
+	}
+	if n, err := migrateCourses(ctx, sourceDB, pgDB); err != nil {
+		log.Fatalf("migrate courses: %v", err)
+	} else {
+		log.Printf("%-20s %d rows migrated", "courses", n)
+	}
+
+	raceIDs, raceCount, err := migrateRaces(ctx, sourceDB, pgDB)
+	if err != nil {
+		log.Fatalf("migrate races: %v", err)
+	}
+	log.Printf("%-20s %d rows migrated (%d canonical target races)", "races", raceCount, uniqueMappedIDs(raceIDs))
+
 	steps := []struct {
 		name string
 		fn   func() (int, error)
 	}{
-		{"users", func() (int, error) { return migrateUsers(ctx, myDB, pgDB) }},
-		{"courses", func() (int, error) { return migrateCourses(ctx, myDB, pgDB) }},
-		{"horses", func() (int, error) { return migrateHorses(ctx, myDB, pgDB) }},
-		{"trainers", func() (int, error) { return migrateTrainers(ctx, myDB, pgDB) }},
-		{"races", func() (int, error) { return migrateRaces(ctx, myDB, pgDB) }},
-		{"pre_race", func() (int, error) { return migratePreRace(ctx, myDB, pgDB) }},
-		{"results", func() (int, error) { return migrateResults(ctx, myDB, pgDB) }},
-		{"intermediary", func() (int, error) { return migrateIntermediary(ctx, myDB, pgDB) }},
+		{"horses", func() (int, error) { return migrateHorses(ctx, sourceDB, pgDB, raceIDs) }},
+		{"trainers", func() (int, error) { return migrateTrainers(ctx, sourceDB, pgDB) }},
+		{"pre_race_runners", func() (int, error) { return migratePreRace(ctx, sourceDB, pgDB, raceIDs) }},
+		{"results", func() (int, error) { return migrateResults(ctx, sourceDB, pgDB, raceIDs) }},
+		{"intermediary", func() (int, error) { return migrateIntermediary(ctx, sourceDB, pgDB, raceIDs) }},
 	}
 
 	for _, s := range steps {
@@ -105,7 +114,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("migrate %s: %v", s.name, err)
 		}
-		log.Printf("%-15s  %d rows migrated", s.name, n)
+		log.Printf("%-20s %d rows migrated", s.name, n)
 	}
 
 	resetSequences(ctx, pgDB)
@@ -149,10 +158,34 @@ func bulkInsert[T any](ctx context.Context, pgDB *bun.DB, rows []T) error {
 	return err
 }
 
+func mappedRaceID(sourceID int, raceIDs map[int]int) (int, error) {
+	targetID, ok := raceIDs[sourceID]
+	if !ok {
+		return 0, fmt.Errorf("source race %d was not migrated", sourceID)
+	}
+	return targetID, nil
+}
+
+func uniqueMappedIDs(raceIDs map[int]int) int {
+	unique := make(map[int]struct{}, len(raceIDs))
+	for _, targetID := range raceIDs {
+		unique[targetID] = struct{}{}
+	}
+	return len(unique)
+}
+
+func sourceTableExists(ctx context.Context, sourceDB *sql.DB, table string) (bool, error) {
+	var exists bool
+	err := sourceDB.QueryRowContext(ctx,
+		`SELECT to_regclass('public.' || $1) IS NOT NULL`, table,
+	).Scan(&exists)
+	return exists, err
+}
+
 // --- per-table migrations ---
 
-func migrateUsers(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx, "SELECT id, username, password FROM users")
+func migrateUsers(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx, "SELECT id, username, password FROM users")
 	if err != nil {
 		return 0, err
 	}
@@ -180,9 +213,9 @@ func migrateUsers(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) 
 	return total + len(batch), rows.Err()
 }
 
-func migrateCourses(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		"SELECT courseID, course, direction, isAw, code FROM courses")
+func migrateCourses(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		"SELECT course_id, course, direction, is_aw, code FROM courses")
 	if err != nil {
 		return 0, err
 	}
@@ -210,10 +243,10 @@ func migrateCourses(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error
 	return total + len(batch), rows.Err()
 }
 
-func migrateHorses(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		`SELECT horseID, horse, lastWinID, highestWinWeight, lastWinWeight,
-		        lastRunWeight, lastWinClaim, lastRunClaim, highestWinOr
+func migrateHorses(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB, raceIDs map[int]int) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		`SELECT horse_id, horse, last_win_id, highest_win_weight, last_win_weight,
+		        last_run_weight, last_win_claim, last_run_claim, highest_win_or
 		 FROM horses`)
 	if err != nil {
 		return 0, err
@@ -238,10 +271,18 @@ func migrateHorses(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error)
 			&lastRunWeight, &lastWinClaim, &lastRunClaim, &highestWinOr); err != nil {
 			return total, err
 		}
+		mappedLastWinID := nullInt(lastWinID)
+		if mappedLastWinID != nil {
+			mapped, mapErr := mappedRaceID(*mappedLastWinID, raceIDs)
+			if mapErr != nil {
+				return total, mapErr
+			}
+			mappedLastWinID = &mapped
+		}
 		batch = append(batch, models.Horse{
 			HorseID:          horseID,
 			Horse:            horse,
-			LastWinID:        nullInt(lastWinID),
+			LastWinID:        mappedLastWinID,
 			HighestWinWeight: nullInt(highestWinWeight),
 			LastWinWeight:    nullInt(lastWinWeight),
 			LastRunWeight:    nullInt(lastRunWeight),
@@ -263,9 +304,9 @@ func migrateHorses(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error)
 	return total + len(batch), rows.Err()
 }
 
-func migrateTrainers(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		"SELECT trainerID, trainer, info FROM trainers")
+func migrateTrainers(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		"SELECT trainer_id, trainer, info FROM trainers")
 	if err != nil {
 		return 0, err
 	}
@@ -301,133 +342,181 @@ func migrateTrainers(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, erro
 	return total + len(batch), rows.Err()
 }
 
-func migrateRaces(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		`SELECT raceID, courseID, date, time, url, class, distance, going,
-		        mr, mr2, analysed, preDone, mainComment, amended
-		 FROM races`)
+func migrateRaces(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB) (map[int]int, int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		`SELECT race_id, course_id, date, time, url, class, distance, going,
+		        band_start, band_end, age_restriction, mr, mr2, analysed,
+		        pre_done, main_comment, amended
+		 FROM races
+		 ORDER BY race_id`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	raceIDs := make(map[int]int)
+	total := 0
+	for rows.Next() {
+		var (
+			sourceRaceID   int
+			courseID       int
+			date           time.Time
+			rtime          string
+			url            string
+			class          sql.NullString
+			distance       float64
+			going          string
+			bandStart      sql.NullInt64
+			bandEnd        sql.NullInt64
+			ageRestriction sql.NullString
+			mr             sql.NullInt64
+			mr2            sql.NullInt64
+			analysed       bool
+			preDone        bool
+			mainComment    sql.NullString
+			amended        bool
+		)
+		if err := rows.Scan(&sourceRaceID, &courseID, &date, &rtime, &url, &class,
+			&distance, &going, &bandStart, &bandEnd, &ageRestriction, &mr, &mr2,
+			&analysed, &preDone, &mainComment, &amended); err != nil {
+			return raceIDs, total, err
+		}
+		race := models.Race{
+			RaceID:         sourceRaceID,
+			CourseID:       courseID,
+			Date:           fmtDate(date),
+			Time:           rtime,
+			URL:            url,
+			Class:          nullStr(class),
+			Distance:       distance,
+			Going:          going,
+			BandStart:      nullInt(bandStart),
+			BandEnd:        nullInt(bandEnd),
+			AgeRestriction: nullStr(ageRestriction),
+			Mr:             nullInt(mr),
+			Mr2:            nullInt(mr2),
+			Analysed:       analysed,
+			PreDone:        preDone,
+			MainComment:    nullStr(mainComment),
+			Amended:        amended,
+		}
+		err := pgDB.NewInsert().Model(&race).
+			On("CONFLICT (course_id, date, time) DO UPDATE").
+			Set("url = EXCLUDED.url").
+			Set("class = COALESCE(EXCLUDED.class, rc.class)").
+			Set("distance = EXCLUDED.distance").
+			Set("going = COALESCE(NULLIF(EXCLUDED.going, ''), rc.going)").
+			Set("band_start = COALESCE(EXCLUDED.band_start, rc.band_start)").
+			Set("band_end = COALESCE(EXCLUDED.band_end, rc.band_end)").
+			Set("age_restriction = COALESCE(EXCLUDED.age_restriction, rc.age_restriction)").
+			Set("mr = COALESCE(EXCLUDED.mr, rc.mr)").
+			Set("mr2 = COALESCE(EXCLUDED.mr2, rc.mr2)").
+			Set("analysed = rc.analysed OR EXCLUDED.analysed").
+			Set("pre_done = rc.pre_done OR EXCLUDED.pre_done").
+			Set("main_comment = COALESCE(EXCLUDED.main_comment, rc.main_comment)").
+			Set("amended = rc.amended OR EXCLUDED.amended").
+			Returning("race_id").Scan(ctx)
+		if err != nil {
+			return raceIDs, total, err
+		}
+		raceIDs[sourceRaceID] = race.RaceID
+		total++
+	}
+	return raceIDs, total, rows.Err()
+}
+
+// migratePreRace copies normalized source rows when available and otherwise
+// expands the legacy pre_race JSON arrays.
+func migratePreRace(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB, raceIDs map[int]int) (int, error) {
+	hasNormalized, err := sourceTableExists(ctx, sourceDB, "pre_race_runners")
+	if err != nil {
+		return 0, err
+	}
+	if hasNormalized {
+		return migrateNormalizedPreRace(ctx, sourceDB, pgDB, raceIDs)
+	}
+	rows, err := sourceDB.QueryContext(ctx, `SELECT race_id, runners FROM pre_race`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0
+	for rows.Next() {
+		var sourceRaceID int
+		var runners []byte
+		if err := rows.Scan(&sourceRaceID, &runners); err != nil {
+			return total, err
+		}
+		raceID, err := mappedRaceID(sourceRaceID, raceIDs)
+		if err != nil {
+			return total, err
+		}
+		result, err := pgDB.ExecContext(ctx, `
+   INSERT INTO pre_race_runners (race_id, horse_id, runner)
+   SELECT ?, (runner->>'horseID')::integer, runner
+   FROM jsonb_array_elements(?::jsonb) AS runner
+   ON CONFLICT (race_id, horse_id) DO UPDATE SET runner = EXCLUDED.runner`, raceID, string(runners))
+		if err != nil {
+			return total, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += int(count)
+	}
+	return total, rows.Err()
+}
+
+func migrateNormalizedPreRace(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB, raceIDs map[int]int) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		`SELECT id, race_id, horse_id, runner FROM pre_race_runners ORDER BY id`)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 
-	var batch []models.Race
+	batch := make([]models.PreRaceRunner, 0, batchSize)
 	total := 0
+	flush := func() error {
+		if err := bulkInsert(ctx, pgDB, batch); err != nil {
+			return err
+		}
+		total += len(batch)
+		batch = batch[:0]
+		return nil
+	}
 	for rows.Next() {
-		var (
-			raceID      int
-			courseID    int
-			date        time.Time
-			rtime       string
-			url         string
-			class       sql.NullString
-			distance    float64
-			going       string
-			mr          sql.NullInt64
-			mr2         sql.NullInt64
-			analysed    bool
-			preDone     bool
-			mainComment sql.NullString
-			amended     bool
-		)
-		if err := rows.Scan(&raceID, &courseID, &date, &rtime, &url, &class,
-			&distance, &going, &mr, &mr2, &analysed, &preDone, &mainComment, &amended); err != nil {
+		var row models.PreRaceRunner
+		var sourceRaceID int
+		if err := rows.Scan(&row.ID, &sourceRaceID, &row.HorseID, &row.Runner); err != nil {
 			return total, err
 		}
-		batch = append(batch, models.Race{
-			RaceID:      raceID,
-			CourseID:    courseID,
-			Date:        fmtDate(date),
-			Time:        rtime,
-			URL:         url,
-			Class:       nullStr(class),
-			Distance:    distance,
-			Going:       going,
-			Mr:          nullInt(mr),
-			Mr2:         nullInt(mr2),
-			Analysed:    analysed,
-			PreDone:     preDone,
-			MainComment: nullStr(mainComment),
-			Amended:     amended,
-		})
-		if len(batch) >= batchSize {
-			if err := bulkInsert(ctx, pgDB, batch); err != nil {
-				return total, err
-			}
-			total += len(batch)
-			batch = batch[:0]
-		}
-	}
-	if err := bulkInsert(ctx, pgDB, batch); err != nil {
-		return total, err
-	}
-	return total + len(batch), rows.Err()
-}
-
-func migratePreRace(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		`SELECT id, runners, course, courseID, date, time, raceID,
-		        direction, distance, class, url
-		 FROM preRace`)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
-	var batch []models.PreRace
-	total := 0
-	for rows.Next() {
-		var (
-			id        int
-			runners   []byte
-			course    string
-			courseID  int
-			date      time.Time
-			rtime     string
-			raceID    int
-			direction string
-			distance  float64
-			class     string
-			url       string
-		)
-		if err := rows.Scan(&id, &runners, &course, &courseID, &date, &rtime,
-			&raceID, &direction, &distance, &class, &url); err != nil {
+		raceID, err := mappedRaceID(sourceRaceID, raceIDs)
+		if err != nil {
 			return total, err
 		}
-		batch = append(batch, models.PreRace{
-			ID:        id,
-			Runners:   json.RawMessage(runners),
-			Course:    course,
-			CourseID:  courseID,
-			Date:      fmtDate(date),
-			Time:      rtime,
-			RaceID:    raceID,
-			Direction: direction,
-			Distance:  distance,
-			Class:     class,
-			URL:       url,
-		})
-		if len(batch) >= batchSize {
-			if err := bulkInsert(ctx, pgDB, batch); err != nil {
+		row.RaceID = raceID
+		batch = append(batch, row)
+		if len(batch) == batchSize {
+			if err := flush(); err != nil {
 				return total, err
 			}
-			total += len(batch)
-			batch = batch[:0]
 		}
 	}
-	if err := bulkInsert(ctx, pgDB, batch); err != nil {
+	if err := flush(); err != nil {
 		return total, err
 	}
-	return total + len(batch), rows.Err()
+	return total, rows.Err()
 }
 
-func migrateResults(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		`SELECT id, horseID, courseID, raceID, age, price, trainer, jockey, number,
-		        headgear, placed, pace, officialRat, winDist, distBehindWinner,
-		        weightCarried, cardWeight, claim, rpr, ts,
-		        mrPlusOr, mr2PlusOr, wCmr2PlusOr, wCmr1PlusOr, totRPR,
-		        tfr, tfsf, tfsfMinusOr, secT, speedPer, comment, analysed
+func migrateResults(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB, raceIDs map[int]int) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		`SELECT id, horse_id, course_id, race_id, age, price, trainer, jockey, number,
+		        headgear, placed, pace, official_rat, win_dist, dist_behind_winner,
+		        weight_carried, card_weight, claim, rpr, ts,
+		        mr_plus_or, mr2_plus_or, wc_mr2_plus_or, wc_mr1_plus_or, tot_rpr,
+		        tfr, tfsf, tfsf_minus_or, sec_t, speed_per, comment, analysed
 		 FROM results`)
 	if err != nil {
 		return 0, err
@@ -480,11 +569,15 @@ func migrateResults(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error
 		); err != nil {
 			return total, err
 		}
+		targetRaceID, err := mappedRaceID(raceID, raceIDs)
+		if err != nil {
+			return total, err
+		}
 		batch = append(batch, models.Result{
 			ID:               id,
 			HorseID:          horseID,
 			CourseID:         courseID,
-			RaceID:           raceID,
+			RaceID:           targetRaceID,
 			Age:              age,
 			Price:            price,
 			Trainer:          trainer,
@@ -528,9 +621,9 @@ func migrateResults(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error
 	return total + len(batch), rows.Err()
 }
 
-func migrateIntermediary(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, error) {
-	rows, err := myDB.QueryContext(ctx,
-		"SELECT id, horseID, raceID, mrPlusOr, tfr FROM intermediary")
+func migrateIntermediary(ctx context.Context, sourceDB *sql.DB, pgDB *bun.DB, raceIDs map[int]int) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx,
+		"SELECT id, horse_id, race_id, mr_plus_or, tfr FROM intermediary")
 	if err != nil {
 		return 0, err
 	}
@@ -549,10 +642,14 @@ func migrateIntermediary(ctx context.Context, myDB *sql.DB, pgDB *bun.DB) (int, 
 		if err := rows.Scan(&id, &horseID, &raceID, &mrPlusOr, &tfr); err != nil {
 			return total, err
 		}
+		targetRaceID, err := mappedRaceID(raceID, raceIDs)
+		if err != nil {
+			return total, err
+		}
 		batch = append(batch, models.Intermediary{
 			ID:       id,
 			HorseID:  horseID,
-			RaceID:   raceID,
+			RaceID:   targetRaceID,
 			MrPlusOr: nullInt(mrPlusOr),
 			Tfr:      nullStr(tfr),
 		})
@@ -578,7 +675,7 @@ func resetSequences(ctx context.Context, pgDB *bun.DB) {
 		{"horses_horse_id_seq", "horses", "horse_id"},
 		{"trainers_trainer_id_seq", "trainers", "trainer_id"},
 		{"races_race_id_seq", "races", "race_id"},
-		{"pre_race_id_seq", "pre_race", "id"},
+		{"pre_race_runners_id_seq", "pre_race_runners", "id"},
 		{"results_id_seq", "results", "id"},
 		{"intermediary_id_seq", "intermediary", "id"},
 	}
@@ -610,7 +707,7 @@ func missingTables(ctx context.Context, pgDB *bun.DB) ([]string, error) {
 		"horses",
 		"trainers",
 		"races",
-		"pre_race",
+		"pre_race_runners",
 		"results",
 		"intermediary",
 	}

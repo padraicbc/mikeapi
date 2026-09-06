@@ -41,6 +41,7 @@ func (h *Handler) GetPreRace(c echo.Context) error {
 	if date == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "missing date param")
 	}
+	ageRestriction := c.QueryParam("ageRestriction")
 
 	type preRaceRow struct {
 		Course    string          `bun:"course"`
@@ -57,12 +58,17 @@ func (h *Handler) GetPreRace(c echo.Context) error {
 
 	var rows []preRaceRow
 	err := h.db.NewRaw(`
-		SELECT pr.course, pr.course_id, pr.race_id, pr.time, pr.direction,
-		       pr.distance, pr.runners, pr.url, rc.mr, rc.class
-		FROM pre_race pr
-		INNER JOIN races rc ON rc.race_id = pr.race_id
-		WHERE pr.date = ?`,
-		date,
+			SELECT c.course, rc.course_id, rc.race_id, rc.time, c.direction,
+			       rc.distance,
+			       COALESCE(jsonb_agg(prr.runner ORDER BY prr.id) FILTER (WHERE prr.id IS NOT NULL), '[]'::jsonb) AS runners,
+			       rc.url, rc.mr, rc.class
+			FROM pre_race_runners prr
+ INNER JOIN races rc ON rc.race_id = prr.race_id
+ INNER JOIN courses c ON c.course_id = rc.course_id
+			WHERE rc.date = ?
+			  AND (? = '' OR rc.age_restriction = ?)
+			GROUP BY c.course, rc.course_id, rc.race_id, rc.time, c.direction, rc.distance, rc.url, rc.mr, rc.class`,
+		date, ageRestriction, ageRestriction,
 	).Scan(c.Request().Context(), &rows)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -163,7 +169,7 @@ func doInterInsert(ctx context.Context, db *bun.DB, pre []interMed, mr, raceID s
 	return nil
 }
 
-// UpdatePreRace updates runners JSON in pre_race and mr in races.
+// UpdatePreRace updates pre_race_runners and mr in races.
 func (h *Handler) UpdatePreRace(c echo.Context) error {
 	mr := c.QueryParam("mr")
 	raceID := c.QueryParam("raceID")
@@ -198,9 +204,14 @@ func (h *Handler) UpdatePreRace(c echo.Context) error {
 				}
 			}()
 
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE pre_race SET runners = ?::jsonb WHERE race_id = ?`, payload, raceID,
-			); err != nil {
+			if _, err = tx.ExecContext(ctx, `DELETE FROM pre_race_runners WHERE race_id = ?`, raceID); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `
+				INSERT INTO pre_race_runners (race_id, horse_id, runner)
+				SELECT ?, (runner->>'horseID')::integer, runner
+				FROM jsonb_array_elements(?::jsonb) AS runner
+				ON CONFLICT (race_id, horse_id) DO UPDATE SET runner = EXCLUDED.runner`, raceID, payload); err != nil {
 				return err
 			}
 			if _, err = tx.ExecContext(ctx,
